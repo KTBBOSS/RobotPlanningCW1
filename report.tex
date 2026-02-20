@@ -1,0 +1,390 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---- packages ----
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+
+\titlespacing*{\section}{0pt}{1.2ex plus 0.3ex}{0.6ex plus 0.1ex}
+\titlespacing*{\subsection}{0pt}{0.8ex plus 0.2ex}{0.4ex plus 0.1ex}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{COMP0224 Coursework 1}
+\lhead{Student ID: 4331}
+\rfoot{Page \thepage}
+
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0em}
+
+\begin{document}
+
+% ================================================================
+\begin{center}
+    {\LARGE\bfseries COMP0224 Coursework 1: Robot Path Planning}\\[0.6em]
+    {\large Student Seed: \texttt{4331} \enspace|\enspace Hash: \texttt{f0f5c2c361ff1294317fe3554e3918b2}}\\[0.3em]
+    {\normalsize 7 static obstacles, POLY triangular robot, horizontal dynamic patrol}\\[0.2em]
+    {\small Code repository: \url{https://github.com/KTBBOSS/RobotPlanningCW1}}
+\end{center}
+\vspace{0.3em}\hrule\vspace{0.8em}
+
+% ================================================================
+\section{Phase 1: The Geometry of Planning}
+% ================================================================
+
+\subsection{Task 1.1: C-Space Obstacle Computation}
+
+The configuration space (C-space) transforms the planning problem from reasoning about a robot with physical extent into reasoning about a \emph{point robot} navigating among enlarged obstacles. The C-space obstacle set is computed as the \textbf{Minkowski difference}:
+\[
+    \mathcal{C}_{\mathrm{obs}} = \mathcal{O} \ominus \mathcal{R} = \mathcal{O} \oplus (-\mathcal{R}), \quad\text{where}\quad (-\mathcal{R}) = \{-\mathbf{r} : \mathbf{r} \in \mathcal{R}\}
+\]
+This ensures that every point $\mathbf{q} \in \mathcal{C}_{\mathrm{obs}}$ corresponds to a robot placement where the physical body overlaps an obstacle.
+
+\textbf{Implementation.}
+On the discretised grid, $\mathcal{O} \oplus (-\mathcal{R})$ is implemented as \textbf{morphological dilation} (\texttt{scipy.ndimage.binary\_dilation}). The structuring element (kernel) is the rasterised reflected robot $(-\mathcal{R})$:
+
+\begin{itemize}[nosep]
+    \item \textbf{POLY robot} (seed 4331): the original vertices are reflected about the origin and rasterised via \texttt{skimage.draw.polygon} into an $11{\times}9$ boolean kernel.  E.g.\ vertex $(0.5,\,0)$ becomes $(-0.5,\,0)$.
+    \item \textbf{Boundary padding}: the robot centre must remain far enough from map edges that no part of the body protrudes. Padding of $\lceil \max|v_x|/\Delta \rceil$ and $\lceil \max|v_y|/\Delta \rceil$ cells is applied on each side.
+\end{itemize}
+
+Result: of 40\,000 grid cells ($200\times200$), 30\,327 (75.8\%) remain free in C-space.
+
+\subsection{Task 1.2: Grid Discretisation \& Collision Checking}
+
+The workspace $[-10,10]^2$ is discretised at $\Delta = 0.1\,\text{m}$ resolution, yielding a $200\times200$ occupancy grid. The collision-checking function performs an $O(1)$ lookup on \texttt{cspace\_grid}[$g_x, g_y$], returning collision if the cell is occupied or out of bounds. A \textbf{feasibility check} using A* confirms a valid path exists (22.71\,m) before planning proceeds.
+
+\subsection{Task 1.3: Workspace vs.\ C-Space Visualisation}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase1_workspace_cspace.png}
+    \caption{Workspace (left) and C-space (right) for seed 4331.}
+    \label{fig:phase1}
+\end{figure}
+
+Figure~\ref{fig:phase1} presents the core result of Phase~1. In the \textbf{left panel} (workspace), the 7 randomly placed rectangular obstacles are shown in grey, and the triangular robot footprint is drawn at its start position $(-7.14, -8.34)$ in red. The goal is at $(7.87, 8.21)$.
+
+In the \textbf{right panel} (C-space), the obstacles have been \emph{grown} by the Minkowski difference with the reflected robot. The \textcolor{pink}{pink regions} represent the C-space growth: areas where the \emph{centre} of the robot cannot be placed without causing a collision. The dark grey cores are the original obstacles. Critically, within the C-space representation the robot is now a \textbf{point}, which simplifies all subsequent path planning to searching over a 2D grid.
+
+Several observations from this figure:
+\begin{itemize}[nosep]
+    \item The growth is \textbf{asymmetric} because the triangular robot is asymmetric: the dilation extends further in the $+x$ direction (where the triangle's apex lies at 0.5\,m) than in the $-x$ direction (0.3\,m).
+    \item The \textbf{boundary padding} (visible as pink strips along the map edges) prevents the robot from partially leaving the workspace.
+    \item Despite the obstacle growth, a clear diagonal corridor remains between start and goal, confirming feasibility.
+    \item Two obstacles in the upper-right quadrant nearly merge in C-space, forming a \textbf{narrow passage} that the planners must negotiate.
+\end{itemize}
+
+\subsection{Task 1.4: Effect of Robot Orientation on C-Space}
+
+Our implementation assumes $\theta = 0$ (fixed orientation), which is valid for this coursework since the robot translates without rotation. However, for a non-circular robot with variable orientation, the analysis changes fundamentally.
+
+\textbf{For a circular robot}, the full configuration space is still $\mathbb{R}^2 \times S^1$ if rotation is permitted, but the collision set is $\theta$-invariant because a circle reflected about the origin is identical to itself ($-\mathcal{R} = \mathcal{R}$). Since $\mathcal{O} \oplus (-\mathcal{R})$ does not depend on $\theta$, planning can be reduced to 2-D $(x,y)$.
+
+\textbf{For a non-circular robot} (e.g.\ our triangle), the C-space becomes \textbf{3-dimensional}: $\mathcal{C} = \mathbb{R}^2 \times S^1 = (x, y, \theta)$. Each orientation $\theta$ yields a \emph{different} 2-D slice $\mathcal{C}_{\mathrm{obs}}(\theta)$ because the reflected robot $-\mathcal{R}(\theta)$ changes shape:
+
+\begin{enumerate}[nosep]
+    \item At $\theta = 0^\circ$, the reflected triangle has vertices at $(-0.5, 0),\; (0.3, -0.4),\; (0.3, 0.4)$. The dilation kernel is wider in $x$ (11 cells) than $y$ (9 cells).
+    \item At $\theta = 90^\circ$, the rotated triangle is taller than it is wide, so the kernel becomes wider in $y$ and narrower in $x$. C-space obstacles shift shape accordingly.
+    \item At intermediate angles, the kernel is neither axis-aligned nor symmetric, producing irregularly shaped C-space obstacles.
+\end{enumerate}
+
+\textbf{Practical consequences:}
+\begin{itemize}[nosep]
+    \item A narrow horizontal passage traversable at $\theta = 90^\circ$ (slim profile) may be \textbf{blocked at $\theta = 0^\circ$} (wide profile). Planning must therefore consider orientation as a degree of freedom.
+    \item The full 3-D C-space can be handled by: (a) discretising $\theta$ into $N_\theta$ slices and precomputing separate dilation kernels for each, yielding an $N_x \times N_y \times N_\theta$ grid; or (b) using sampling-based planners operating directly in $\mathrm{SE}(2) = \mathbb{R}^2 \times S^1$ (e.g.\ SE(2)-RRT).
+    \item The computational cost scales linearly with $N_\theta$ for grid-based approaches, or adds a third dimension to the nearest-neighbour search for sampling-based methods.
+\end{itemize}
+
+% ================================================================
+\section{Phase 2: Search and Sampling}
+% ================================================================
+
+\subsection{Task 2.1: A* and Weighted A*}
+
+\textbf{Algorithm.}
+A*/Weighted A* on an 8-connected grid with priority $f(n) = g(n) + \omega \cdot h(n)$, where $\omega = 1$ recovers standard A*:
+\begin{itemize}[nosep]
+    \item \textbf{Cost model}: cardinal moves cost 1.0, diagonal moves cost $\sqrt{2}$.
+    \item \textbf{Heuristic}: Euclidean distance $h(n) = \|\mathbf{n} - \mathbf{g}\|_2$, which is \emph{admissible} because it lower-bounds the length of any feasible grid path (no piecewise grid path can be shorter than the straight-line distance). Under our move costs ($1$, $\sqrt{2}$), Euclidean distance is also \emph{consistent} on an 8-connected grid.
+    \item \textbf{Corner-cutting prevention}: diagonal moves $(dx, dy)$ are blocked if either adjacent cardinal cell is occupied, preventing paths from clipping through obstacle corners.
+    \item \textbf{Weight $\omega$}: at $\omega = 1$ the search is optimal; $\omega > 1$ inflates the heuristic, biasing the search towards the goal and typically reducing node expansions at the expense of optimality.
+\end{itemize}
+
+\subsection{Task 2.2: RRT-Connect}
+
+Bidirectional RRT-Connect in \emph{continuous} $(x,y)$ C-space:
+\begin{itemize}[nosep]
+    \item Two trees grow from start ($T_s$) and goal ($T_g$), alternating \textsc{Extend}/\textsc{Connect} roles each iteration.
+    \item \textbf{Step size}: 0.5\,m, controlling the maximum distance per tree extension.
+    \item \textbf{Line-of-sight collision checker}: samples along candidate edges at $0.5\Delta = 0.05\,$m intervals, providing conservative collision checking relative to the grid resolution.
+    \item \textbf{Nearest-neighbour search}: linear scan over tree vertices (sufficient for the problem scale; could be accelerated with a KD-tree for larger environments).
+\end{itemize}
+
+\textbf{Narrow passages.}
+Randomised obstacle layouts may create narrow gaps (e.g.\ the near-merging obstacles in seed 4331's upper-right quadrant, visible in Figure~\ref{fig:phase1}). To improve RRT-Connect performance in tight corridors, we use (i) a conservative edge checker sampling at 0.05\,m intervals to avoid skipping thin collision-free regions, and (ii) a moderate step size (0.5\,m) to prevent ``jumping over'' feasible passages. In more constrained layouts, smaller step sizes would increase success probability at the cost of more tree nodes. In extremely tight passages, goal-biasing or adaptive step sizing can further improve connection probability. The bidirectional tree growth also helps: when one tree struggles in a narrow passage, the other may find an alternative route.
+
+\subsection{Task 2.3: Algorithm Comparison across 5 Seeds}
+
+Table~\ref{tab:5seed} presents the full comparison across 5 distinct seeds: 4331 (the student seed) and four randomly chosen seeds (1409, 2824, 5012, 5506). Each seed generates a unique obstacle layout, robot shape (POLY or RECT), and start/goal configuration. RRT-Connect results are averaged over 5 runs per seed.
+
+\begin{table}[H]
+\centering
+\caption{Per-seed comparison of A* variants and RRT-Connect. RRT-Connect reports the mean of 5 runs.}
+\label{tab:5seed}
+\footnotesize
+\begin{tabular}{@{}clrrr@{}}
+\toprule
+\textbf{Seed} & \textbf{Algorithm} & \textbf{Time (ms)} & \textbf{Path Length (m)} & \textbf{Nodes / Tree} \\
+\midrule
+\multirow{4}{*}{4331}
+ & A* ($\omega\!=\!1.0$) &  13.3 & 22.71 &  3\,227 \\
+ & A* ($\omega\!=\!1.5$) &   1.0 & 22.71 &    166 \\
+ & A* ($\omega\!=\!5.0$) &   1.0 & 22.71 &    166 \\
+ & RRT-Connect           &   1.1 & 22.37 &     47 \\
+\midrule
+\multirow{4}{*}{1409}
+ & A* ($\omega\!=\!1.0$) &  36.0 & 23.27 &  8\,686 \\
+ & A* ($\omega\!=\!1.5$) &   1.2 & 23.27 &    187 \\
+ & A* ($\omega\!=\!5.0$) &   1.1 & 23.27 &    184 \\
+ & RRT-Connect           &   3.4 & 26.99 &     93 \\
+\midrule
+\multirow{4}{*}{2824}
+ & A* ($\omega\!=\!1.0$) &   2.9 & 23.11 &    647 \\
+ & A* ($\omega\!=\!1.5$) &   1.0 & 23.11 &    165 \\
+ & A* ($\omega\!=\!5.0$) &   1.2 & 23.11 &    165 \\
+ & RRT-Connect           &   1.0 & 23.09 &     49 \\
+\midrule
+\multirow{4}{*}{5012}
+ & A* ($\omega\!=\!1.0$) &  41.4 & 25.61 &  7\,662 \\
+ & A* ($\omega\!=\!1.5$) &   1.7 & 25.61 &    265 \\
+ & A* ($\omega\!=\!5.0$) &   1.1 & 25.61 &    197 \\
+ & RRT-Connect           &   2.8 & 27.10 &     76 \\
+\midrule
+\multirow{4}{*}{5506}
+ & A* ($\omega\!=\!1.0$) &  45.2 & 24.22 & 10\,691 \\
+ & A* ($\omega\!=\!1.5$) &   2.6 & 24.22 &    565 \\
+ & A* ($\omega\!=\!5.0$) &   1.4 & 24.22 &    191 \\
+ & RRT-Connect           &   2.7 & 25.76 &     81 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Mean $\pm$ std across all 5 seeds.}
+\label{tab:5seed_avg}
+\footnotesize
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time (ms)} & \textbf{Path Length (m)} & \textbf{Memory (nodes/tree)} \\
+\midrule
+A* ($\omega\!=\!1.0$)  & $27.8 \pm 16.6$ & $23.78 \pm 1.04$ & $6\,183 \pm 3\,692$ \\
+A* ($\omega\!=\!1.5$)  & $1.5 \pm 0.6$   & $23.78 \pm 1.04$ & $270 \pm 152$ \\
+A* ($\omega\!=\!5.0$)  & $1.2 \pm 0.1$   & $23.78 \pm 1.04$ & $181 \pm 13$ \\
+RRT-Connect             & $2.2 \pm 0.9$   & $25.06 \pm 1.97$ & $69 \pm 18$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Computation Time.}
+Optimal A* ($\omega = 1.0$) averages 27.8\,ms across the 5 seeds, ranging from 2.9\,ms (seed 2824, open layout) to 45.2\,ms (seed 5506, more cluttered). Weighted variants reduce this to 1.2--1.5\,ms on average, roughly a $20\times$ speedup. RRT-Connect averages 2.2\,ms, faster than optimal A* but comparable to the weighted variants.
+
+\textbf{Path Length (Optimality).}
+A* ($\omega = 1.0$) always finds the optimal grid path under the chosen cost model. In our experiments, Weighted A* ($\omega = 1.5$ and $\omega = 5.0$) matched the A* optimal on all 5 seeds; however, for $\omega > 1$ optimality is not guaranteed in general because the heuristic is inflated, and longer paths can occur in more constrained layouts. RRT-Connect paths are typically 6--16\% longer than the A* optimum; however, in seeds 4331 and 2824 the continuous-space sampling produced slightly shorter paths (22.37\,m vs.\ 22.71\,m and 23.09\,m vs.\ 23.11\,m respectively) than the grid-constrained A* solution, demonstrating that operating in continuous space can occasionally outperform grid quantisation.
+
+\textbf{Memory Usage.}
+Optimal A* expands $6\,183 \pm 3\,692$ nodes on average. Weighted A* ($\omega = 5.0$) reduces this to $181 \pm 13$ (a $34\times$ reduction). RRT-Connect uses even fewer vertices ($69 \pm 18$ tree nodes on average), though this comparison is not strictly apples-to-apples: A* ``memory'' counts expanded grid cells, while RRT tree nodes carry additional per-vertex data (coordinates, parent pointers).
+
+\textbf{Determinism vs.\ Stochasticity.}
+A* is deterministic: the same seed always produces the same result. RRT-Connect is stochastic with noticeable variance: for instance, on seed 1409 the path length standard deviation across 5 RRT runs is larger than on seed 2824, reflecting different obstacle geometries and narrow-passage difficulty.
+
+\textbf{Completeness.}
+A* is \emph{complete} and returned successful paths for all 5 seeds. RRT-Connect is \emph{probabilistically complete} and also succeeded on all 5 seeds (25/25 runs), though in more constrained environments its success rate within a fixed iteration budget would decrease.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase2_paths.png}
+    \caption{Phase 2 paths for seed 4331. Left: A* variants ($\omega = 1.0, 1.5, 5.0$). Right: all paths including RRT-Connect (red).}
+    \label{fig:phase2_paths}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase2_expansion.png}
+    \caption{A* node expansion for seed 4331. $\omega = 1.0$ explores a broad band (3\,227 nodes). $\omega = 1.5$ and $5.0$ focus tightly on the corridor (166 nodes each), illustrating the time--optimality trade-off.}
+    \label{fig:phase2_expansion}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{phase2_comparison_bars.png}
+    \caption{Bar chart comparison across all metrics for seed 4331.}
+    \label{fig:phase2_bars}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{phase2_rrt_variability.png}
+    \caption{RRT-Connect variability across 5 runs for seed 4331. The dashed blue line shows the A* optimal length (22.71\,m).}
+    \label{fig:phase2_rrt}
+\end{figure}
+
+% ================================================================
+\section{Phase 3: Dynamics and Refinement}
+% ================================================================
+
+\subsection{Task 3.1: Path Smoothing}
+
+Raw grid-based A* paths are inherently \textbf{jagged}: they consist of sequences of axis-aligned and 45-degree segments dictated by the 8-connected grid. Such paths are unsuitable for physical controllers, which require smooth velocity and acceleration profiles. We implement a two-stage smoother to achieve \textbf{$C^2$ continuity}.
+
+\textbf{Stage 1: Greedy Shortcutting.}
+Starting from waypoint $i = 0$, we find the farthest waypoint $j$ reachable via a collision-free straight line (checked at 0.05\,m intervals). We advance to $j$ and repeat. This eliminates redundant intermediate waypoints, reducing the 166-point A* path to a small set of essential \emph{control points} while preserving collision-freeness.
+
+\textbf{Stage 2: Natural Cubic Spline.}
+The control points are fitted with a \textbf{natural cubic spline} parameterised by cumulative arc length $s$:
+\[
+    x(s) = a_i + b_i(s - s_i) + c_i(s - s_i)^2 + d_i(s - s_i)^3, \quad s \in [s_i, s_{i+1}]
+\]
+Natural boundary conditions ($x''(0) = x''(L) = 0$) are applied to both $x(s)$ and $y(s)$ independently. The key property of cubic splines is that they guarantee:
+\begin{itemize}[nosep]
+    \item $C^0$ continuity: the path is connected (trivial).
+    \item $C^1$ continuity: the first derivative (tangent direction / velocity) is continuous at every knot. No abrupt direction changes.
+    \item $C^2$ continuity: the second derivative (curvature / acceleration) is continuous at every knot, with no instantaneous curvature jumps. This is essential for smooth physical motion.
+\end{itemize}
+
+\textbf{Collision Validation \& Fallback.}
+The smoothed path is densely sampled and verified collision-free. If the shortcutting + spline introduces a collision (e.g.\ the spline ``overshoots'' near an obstacle), the smoother falls back to using progressively more original A* waypoints as control points until a safe smooth path is found.
+
+\textbf{Results.} Raw: 166 waypoints, 22.71\,m. Smoothed: 300 points, 22.30\,m (1.8\% shorter). Figure~\ref{fig:phase3_smoothing} provides analytical proof of $C^2$ continuity: the first derivative is continuous and varies smoothly, the second derivative is continuous, and the \textbf{curvature profile} $\kappa(s)$ is smooth throughout with no discontinuities at knot points.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase3_dynamics.png}
+    \caption{Seed 4331. Left: raw A* (grey) vs.\ smoothed spline (blue). Right: Space-Time A* path coloured by time.}
+    \label{fig:phase3_main}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase3_smoothing_detail.png}
+    \caption{$C^2$ continuity proof (seed 4331). Left: path overlay. Centre: $\|$path$'(s)\|$ and $\|$path$''(s)\|$, both continuous. Right: curvature $\kappa(s)$ is smooth and finite everywhere.}
+    \label{fig:phase3_smoothing}
+\end{figure}
+
+\subsection{Task 3.2: Dynamic Obstacle Handling (Space-Time A*)}
+
+\textbf{The Challenge.}
+A cylindrical obstacle (radius 0.5\,m) patrols horizontally between $(-8, 0)$ and $(8, 0)$, bouncing in a triangular-wave pattern. The PyBullet simulator runs at $\delta t_{\mathrm{sim}} = 1/240$\,s per physics step, while the planner uses a coarser $\Delta t_{\mathrm{plan}} = \Delta / v_{\mathrm{robot}} = 0.1$\,s per grid move; the obstacle position is predicted at real time $t = t_s \cdot \Delta t_{\mathrm{plan}}$. The robot's diagonal path from start to goal necessarily crosses the patrol line near $(0, 0)$. A static planner would route through this zone, causing a collision when the obstacle is present.
+
+\textbf{Why Space-Time A*?}
+We chose Space-Time A* over the alternatives (SIPP, D* Lite) for several reasons:
+\begin{itemize}[nosep]
+    \item The obstacle trajectory is \textbf{fully known} (deterministic patrol), making time-parameterised planning natural.
+    \item Space-Time A* directly extends the A* implementation from Phase~2, reusing the same grid, heuristic framework, and corner-cutting logic.
+    \item Unlike D* Lite (which replans upon detecting changes), Space-Time A* computes an optimal path on the discretised space-time grid under the chosen cost model, avoiding the overhead of repeated replanning.
+    \item SIPP would be more efficient in environments with many dynamic obstacles (it compresses time intervals), but for a single patrol obstacle the simpler Space-Time A* is sufficient.
+\end{itemize}
+Space-Time A* plans jointly over space and time (including wait actions), thereby proactively avoiding collisions without requiring online replanning.
+
+\textbf{State Space.}
+The state is a triple $(g_x, g_y, t_s)$ where $g_x, g_y$ are grid coordinates and $t_s$ is a discrete time step. Each time step corresponds to $\Delta t = \Delta / v_{\mathrm{robot}} = 0.1$\,s (i.e.\ the robot moves one grid cell per time step at speed $v = 1$\,m/s).
+
+\textbf{Actions.}
+Nine actions: 8-connected spatial moves plus \textbf{wait in place}. All cost 1 time step; waiting receives a tiny penalty (1.001) for tie-breaking to prefer movement over idling.
+
+\textbf{Dynamic Obstacle Prediction.}
+The patrol obstacle's position at real time $t$ is computed analytically using the triangular-wave formula from the simulation's linear interpolation logic. The robot's C-space inflation for the dynamic obstacle combines:
+\[
+    r_{\mathrm{inflated}} = r_{\mathrm{obs}} + r_{\mathrm{robot}} + r_{\mathrm{safety}} = 0.5 + 0.5 + 0.15 = 1.15\;\text{m}
+\]
+where $r_{\mathrm{robot}} = \max_{\mathbf{v} \in \mathcal{R}} \|\mathbf{v}\| = 0.5$\,m is the circumscribed radius of the triangular robot, and $r_{\mathrm{safety}} = 0.15$\,m provides additional clearance.
+
+\textbf{Heuristic.}
+The \textbf{Chebyshev distance} $h = \max(|g_x - g_x^*|, |g_y - g_y^*|)$ is used as the heuristic. This is admissible because the minimum number of time steps to reach the goal on an 8-connected grid with unit-cost moves equals the Chebyshev distance (diagonal moves cover both $x$ and $y$ simultaneously).
+
+\textbf{Results.}
+The Space-Time A* planner finds a path of \textbf{23.80\,m} (4.8\% longer than the static 22.71\,m), arriving at $t = 17.5$\,s after expanding 21\,210 nodes in 793.7\,ms. The path detours south near the origin to avoid the patrol zone (Figure~\ref{fig:phase3_static_vs_dynamic}).
+
+\textbf{Safety Analysis.}
+Figure~\ref{fig:phase3_distance} shows the robot-to-obstacle distance throughout the trajectory. The minimum distance is \textbf{1.15\,m} at $t = 8.1$\,s, exactly at the inflated collision boundary. The robot never enters the inflated collision zone ($r_{\mathrm{inflated}} = 1.15$\,m, red-shaded region in the figure). The space-time trajectory plot (Figure~\ref{fig:phase3_spacetime}) reveals that the robot's $x$-coordinate pauses around $t = 5$--$8$\,s, waiting for the obstacle to pass before continuing the diagonal crossing.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase3_distance_profile.png}
+    \caption{Safety proof (seed 4331). Left: distance to dynamic obstacle over time. The inflated collision radius (1.15\,m) is never breached. Right: closest-approach location in the workspace.}
+    \label{fig:phase3_distance}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{phase3_spacetime.png}
+    \caption{Space-time trajectories (seed 4331). The robot $x(t)$ (left, blue) pauses around $t \approx 6$\,s as the obstacle $x(t)$ (left, light blue) crosses the same zone. $y(t)$ (right) increases monotonically.}
+    \label{fig:phase3_spacetime}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\textwidth]{phase3_static_vs_dynamic.png}
+    \caption{Path comparison (seed 4331): static A* (grey, 22.71\,m) vs.\ Space-Time A* (time-coloured, 23.80\,m). The dynamic path detours south near the patrol line to avoid the moving cylinder.}
+    \label{fig:phase3_static_vs_dynamic}
+\end{figure}
+
+\subsection{Task 3.3: Final Execution}
+
+The Space-Time A* timed path $[(x, y, t), \ldots]$ is executed in a \textbf{PyBullet GUI} simulation. The robot is teleported to each waypoint at the corresponding timestamp while the dynamic obstacle patrols autonomously via \texttt{env.update\_simulation()}. The robot reaches the goal at $t = 17.5$\,s and holds for 2\,s to confirm arrival.
+
+\begin{figure}[H]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{phase3_pybullet_env.png}
+        \caption{Environment overview: 7 static rectangular obstacles (grey), triangular robot (red), and cylindrical patrol obstacle (blue) moving horizontally.}
+        \label{fig:pybullet_env}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{phase3_pybullet_avoidance.png}
+        \caption{Robot avoiding the moving cylinder: the robot detours south (visible path) to maintain safe clearance while the cylinder patrols the horizontal corridor.}
+        \label{fig:pybullet_avoidance}
+    \end{subfigure}
+    \caption{PyBullet simulation execution (seed 4331). The robot successfully navigates from start to goal, avoiding all static obstacles and the dynamically moving cylinder.}
+    \label{fig:pybullet}
+\end{figure}
+
+\textbf{Environment Description.}
+Figure~\ref{fig:pybullet_env} shows the full PyBullet environment for seed 4331: 7 randomly placed static rectangular obstacles (grey boxes), the triangular POLY robot (red polygon), and the cylindrical dynamic obstacle (blue cylinder) patrolling horizontally between $(-8, 0)$ and $(8, 0)$. The robot's start position is $(-7.14, -8.34)$ and the goal is $(7.87, 8.21)$.
+
+\textbf{Dynamic Obstacle Avoidance.}
+Figure~\ref{fig:pybullet_avoidance} captures a moment during execution where the robot is actively avoiding the moving cylinder. The Space-Time A* planner computed a path that detours south of the patrol line, timing the robot's crossing to occur when the cylinder is at a safe distance. The robot maintains a minimum clearance of 1.15\,m (as verified in Figure~\ref{fig:phase3_distance}), ensuring collision-free navigation despite the cylinder's continuous motion.
+
+The execution was verified visually: the robot navigates from start to goal, successfully avoiding all 7 static obstacles and the moving cylinder throughout the entire 17.5\,s trajectory. The PyBullet physics simulation confirms that the planned path is not only collision-free in the discrete-time model, but also executable in a continuous physics environment.
+
+% ================================================================
+\section{Conclusion}
+% ================================================================
+
+This report presented a complete robot planning pipeline from geometry through execution:
+\begin{enumerate}[nosep]
+    \item \textbf{C-space computation} via Minkowski difference (morphological dilation), reducing the problem to a point robot on an occupancy grid.
+    \item \textbf{Grid search} (A* / Weighted A*) and \textbf{sampling-based planning} (RRT-Connect), compared across 5 random seeds (4331, 1409, 2824, 5012, 5506). RRT-Connect uses ${\sim}90\times$ fewer \emph{stored vertices} than A* \emph{expanded cells} on average (69 vs.\ 6\,183), noting these memory measures are not strictly equivalent. RRT typically produces 6--16\% longer paths, though seeds 4331 and 2824 showed it can occasionally outperform grid-quantised A* in continuous space.
+    \item \textbf{Path smoothing} via natural cubic splines achieving $C^2$ continuity, verified analytically through curvature profiles.
+    \item \textbf{Dynamic obstacle avoidance} using Space-Time A* in $(x, y, t)$, safely navigating around a patrol obstacle with minimum clearance of 1.15\,m.
+    \item \textbf{Physical execution} in PyBullet, demonstrating the full plan-to-execution pipeline.
+\end{enumerate}
+
+\vspace{0.5em}
+\noindent\textbf{Version hash}: \texttt{f0f5c2c361ff1294317fe3554e3918b2} \quad (unmodified \texttt{env\_factory.py})
+
+\end{document}
