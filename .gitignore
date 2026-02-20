@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Generated plots
+*.png
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.synctex.gz
+
+# Helper scripts (not required for submission)
+multi_seed_benchmark.py
+starter_code.py
+REQUIREMENTS_CHECKLIST.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
